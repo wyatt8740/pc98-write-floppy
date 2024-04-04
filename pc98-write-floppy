@@ -1,0 +1,41 @@
+#! /usr/bin/env sh
+
+# define help text function
+helptext() {
+  echo "Usage:"
+  echo "$0"' [-s] image-filename'
+  echo "  -s: skip ufiformat (skip changing disk type to 1.2MB). Optional."
+  # cat << EOF is a helpful command that writes the following lines of the file
+  # to the terminal until a line containing only "EOF" is reached.
+  # avoids typing multiple echo commands
+}
+
+SGDEV="$(lsscsi -g | grep 'USB-FDU' | awk '{ print $7 }')"
+
+# make sure a file was given
+if [ "$#" -lt 1 ] && [ "$1" = '-s' ]; then
+  # skip ufiformat, and then move past the '-s' so that "$1" now contains
+  # our image file name
+  shift 1
+else
+  sudo ufiformat "$SGDEV" -f 1232
+fi
+
+echo 'waiting 5 seconds'
+sleep 5
+
+SDDEV="$(lsscsi -g | grep 'USB-FDU' | awk '{ print $6 }')"
+
+if [ -e "$1" ]; then
+  # use cat
+  echo 'Writing file to disk.'
+  sudo sh -c 'cat "'"$1"'" > '"$SDDEV"
+  echo 'Nearly done now...'
+  sync
+else
+  # 1>&2 sends the output of the command (echo in this case) to "standard,
+  # error," which is a distinct output stream from "standard output" that
+  # will show up even when a program's output is being 'redirected' or 'piped.'
+  # It's good for error messages.
+  1>&2 echo "Error: The chosen image file to write to disk does not exist."
+fi
