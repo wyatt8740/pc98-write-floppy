@@ -1,31 +1,183 @@
 #! /usr/bin/env sh
 
+# needs:
+#    - sudo
+#    - ufiformat
+#    - mkfs.vfat    (for FAT-formatting a low-level formatted diskette, if not
+#                   using a disk image)
+#    - lsscsi       (or edit this file's "SGDEV=" and "SDDEV=" lines to use
+#                   ufiformat's enumeration, which requires root)
+
+SKIPFORMAT=''
+MAKEFS=''
+FORMATSIZE='1232'
+
 # define help text function
 helptext() {
   echo "Usage:"
-  echo "$0"' [-s] image-filename'
-  echo "  -s: skip ufiformat (skip changing disk type to 1.2MB). Optional."
+  echo "$0"' [-s] [-f] [-2|-4|-6|-7] image-filename'
+  cat << EOF
+  -s: Skip low-level ufiformat (skip changing disk type). Optional.
+  -f: "High level format" the disk with an empty FAT filesystem after
+        the low-level formatting is finished (instead of writing a disk image).
+
+  Size options; if none specified, defaults to 1.232MB (PC-9801 high density):
+    -2:  Turn a differently-formatted high density disk into a PC-9801 style
+         1.232MB disk. This is the default, and usually what you want.
+    -20: Turn a differently-formatted high density disk into a PC-9801 style
+         1.20MB(!) disk. You usually don't want this! Use the default instead.
+    -4:  Turn a differently-formatted high density disk into an IBM style
+         1.44MB disk.
+    -6:  Turn a differently-formatted double density disk into a 640KB disk
+         (8 sectors per track). Requires drive support.
+    -7:  Turn a differently-formatted double density disk into a 720KB disk
+         (9 sectors per track).
+
+EOF
   # cat << EOF is a helpful command that writes the following lines of the file
   # to the terminal until a line containing only "EOF" is reached.
   # avoids typing multiple echo commands
 }
 
-SGDEV="$(lsscsi -g | grep 'USB-FDU' | awk '{ print $7 }')"
-
-# make sure a file was given
-if [ "$#" -lt 3 ] && [ "$1" = '-s' ]; then
-  # skip ufiformat, and then move past the '-s' so that "$1" now contains
-  # our image file name
-  shift 1
-else
-  sudo ufiformat "$SGDEV" -f 1232
+if [ "$#" -eq 0 ]; then
+  1>&2 helptext
+  return 1
 fi
 
-echo 'waiting 5 seconds'
-sleep 5
+# take params of possible names of drive
+findsgdev() {
+  while [ "$#" -gt 0 ]; do
+    SGDEV="$(lsscsi -g | grep 'USB-FDU' | head -n 1 | awk '{ print $8 }')"
+    if [ ! "$SGDEV" ]; then
+      break
+    fi
+    shift 1
+  done
+  if [ ! "$SGDEV" ]; then
+    # fallback: try ufiformat (needs root/sudo)
+    # ufiformat -i version:
+    SGDEV="$(sudo ufiformat -i | tail -n +2 | head -n 1 | awk '{print $2}')"
+  fi
+  echo "$SGDEV"
+}
 
-SDDEV="$(lsscsi -g | grep 'USB-FDU' | awk '{ print $6 }')"
+# take params of possible names of drive
+findsddev() {
+  while [ "$#" -gt 0 ]; do
+    SDDEV="$(lsscsi -g | grep "$1" | head -n 1 |  awk '{ print $7 }')"
+    if [ "$SDDEV" ]; then
+      break
+    fi
+    shift 1
+  done
+  if [ ! "$SDDEV" ]; then
+    # fallback: try ufiformat (needs root/sudo)
+    # ufiformat -i version:
+    SDDEV="$(sudo ufiformat -i | tail -n +2 | head -n 1 | awk '{print $1}')"
+  fi
+  echo "$SDDEV"
+}
 
+# get SGDEV
+# only works with first seen USB floppy interface for now
+# ufiformat -i version:
+#SGDEV="$(sudo ufiformat -i | tail -n +2 | head -n 1 | awk '{print $2}')"
+# lsscsi version, does not need sudo, maybe less reliable
+SGDEV="$(findsgdev 'USB-FDU' 'USB UF000x')"
+
+if [ ! "$SGDEV" ]; then
+  1>&2 echo 'Error: Could not find USB floppy drive SCSI block device (/dev/sg*).'
+  1>&2 echo 'Maybe try switching detection method? (edit the script; read the comments.)'
+  return 1
+fi
+
+# get SDDEV
+# only works with first seen USB floppy interface for now
+# ufiformat -i version
+#SDDEV="$(sudo ufiformat -i | tail -n +2 | head -n 1 | awk '{print $1}')"
+# lsscsi version, does not need sudo, maybe less reliable
+SDDEV="$(findsddev 'USB-FDU' 'USB UF000x')"
+
+if [ ! "$SDDEV" ]; then
+  1>&2 echo 'Error: Could not find USB floppy drive disk block device (/dev/sd*).'
+  1>&2 echo 'Maybe try switching detection method? (edit the script; read the comments.)'
+  return 1
+fi
+
+echo 'Found USB floppy drive SCSI device node:  '"$SGDEV"
+echo 'Found USB floppy drive block device node: '"$SDDEV"
+echo ''
+echo 'If this is wrong, this is your LAST CHANCE to back out before you overwrite'
+echo 'your hard disk! Check "lsscsi -g" output if you are in doubt.'
+echo ''
+echo 'Press ENTER to continue, or ctrl-c (^C) to abort.'
+
+read -r lin
+
+# Check CLI args
+while [ "$#" -ge 1 ]; do
+  case "$1" in
+    '-2')
+      # PC-98 format, 1.232MB; usually what you want.
+      FORMATSIZE='1232'
+      shift 1
+      ;;
+    '-20')
+      # PC-98 format, 1.20MB (usually not wanted!! - the default of 1.232MB is better)
+      FORMATSIZE='1200'
+      shift 1
+      ;;
+    '-4')
+      # IBM format, 1.44MB
+      FORMATSIZE='1440'
+      shift 1
+      ;;
+    '-6')
+      # Double Density 640KB
+      FORMATSIZE='640'
+      shift 1
+      ;;
+    '-7')
+      # Double Density 720KB
+      FORMATSIZE='720'
+      shift 1
+      ;;
+    '-s')
+      # skip ufiformat, and then move past the '-s' so that "$1" now contains
+      # our image file name
+      SKIPLLFORMAT=1
+      shift 1
+      ;;
+    '-f')
+      # make empty DOS filesystem
+      MAKEFS=1
+      shift 1
+      ;;
+    *)
+      # this is our filename probably
+      break
+      ;;
+  esac
+done
+
+if [ ! "$SKIPLLFORMAT" ]; then
+  echo 'Low-level formatting.'
+  echo 'sudo ufiformat '"$SGDEV"' -f '"$FORMATSIZE"
+  sudo ufiformat "$SGDEV" -f "$FORMATSIZE"
+  echo 'waiting 5 seconds'
+  sleep 5
+fi
+
+if [ "$MAKEFS" ]; then
+  echo 'Making a blank FAT filesystem.'
+  echo 'sudo mkfs.vfat '"$SDDEV"
+  sudo mkfs.vfat "$SDDEV"
+  MKFSRET="$?"
+  sync
+  return "$MKFSRET" # return the value returned by mkfs
+fi
+
+echo "ALL ARGS REMAINING: ""$@" 
 if [ -e "$1" ]; then
   # use cat
   echo 'Writing file to disk.'
